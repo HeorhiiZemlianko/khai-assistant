@@ -1,0 +1,15 @@
+// Application configuration
+export const CONFIG = {
+  // Cloudflare Worker proxy URL for Groq API (leave empty to use high-quality template generator)
+  // Example: "https://khai-assistant-groq-proxy.your-account.workers.dev"
+  GROQ_PROXY_URL: "",
+  
+  // Model name used in Groq
+  GROQ_MODEL: "llama-3.3-70b-versatile",
+  
+  // Threshold for classification confidence below which Groq or fallback is considered
+  LOW_CONFIDENCE_THRESHOLD: 0.4,
+  
+  // Threshold for BM25 retrieval score
+  MIN_RELEVANCE_SCORE: 0.15,
+};
