@@ -120,7 +120,11 @@ export async function classifyWithLLM(
   role: string
 ): Promise<LLMClassificationResult | null> {
   const proxyUrl = CONFIG.GROQ_PROXY_URL;
+
+  console.log('[LLM] Proxy URL:', proxyUrl); 
+  
   if (!proxyUrl || proxyUrl.trim() === '') {
+    console.warn('[LLM] Proxy URL is empty, skipping LLM');
     return null;
   }
 
