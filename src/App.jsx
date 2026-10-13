@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { Send, User, Bot, ArrowLeft, Loader2, Sparkles, AlertCircle, Compass } from 'lucide-react';
-import { classifyIntent } from './ai/intent-classifier';
+import { classifyIntentHybrid } from './ai/intent-classifier';
 import { BM25Retriever } from './ai/retrieval';
 import { generateTemplateResponse } from './ai/response-templates';
 import { validateResponse } from './ai/quality-gate';
@@ -117,12 +117,13 @@ export default function App() {
     setIsProcessing(true);
 
     try {
-      // 1. Layer 1: Intent Classification
-      const classification = classifyIntent(query, role || 'Студент');
+      // 1. Layer 1: Hybrid Intent Classification (rules → LLM fallback)
+      const classification = await classifyIntentHybrid(query, role || 'Студент', 0.5);
       console.log('[AI Core] Classification:', {
         intent: classification.intent,
         confidence: classification.confidence.toFixed(2),
-        entities: classification.entities
+        entities: classification.entities,
+        method: classification.method
       });
 
       // 2. Layer 2: BM25 Retrieval
