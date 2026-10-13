@@ -1,3 +1,5 @@
+// src/App.jsx
+
 import React, { useState, useEffect, useRef } from 'react';
 import { Send, User, Bot, ArrowLeft, Loader2, Sparkles, AlertCircle, Compass } from 'lucide-react';
 import { classifyIntentHybrid } from './ai/intent-classifier';
@@ -140,13 +142,16 @@ export default function App() {
       let candidateResponse = '';
       let usedGroq = false;
 
-      // Try Groq LLM if confidence is low, intent recognized, and proxy is configured
+      // Try Groq LLM whenever there are retrieved chunks and the query is not trivially answerable,
+      // OR when confidence is low OR intent is unknown OR retrieval is relevant enough.
       if (
-        classification.confidence < CONFIG.LOW_CONFIDENCE_THRESHOLD &&
-        classification.intent !== 'unknown' &&
-        CONFIG.GROQ_PROXY_URL
+        CONFIG.GROQ_PROXY_URL &&
+        topChunks.length > 0 &&
+        (classification.confidence < CONFIG.LOW_CONFIDENCE_THRESHOLD ||
+         classification.intent === 'unknown' ||
+         bestScore >= CONFIG.MIN_RELEVANCE_SCORE)
       ) {
-        console.log('[AI Core] Low confidence, attempting Groq LLM proxy...');
+        console.log('[AI Core] Attempting Groq LLM proxy...');
         const groqResult = await queryGroqLLM(query, topChunks, role || 'Студент');
         if (groqResult) {
           candidateResponse = groqResult;
