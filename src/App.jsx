@@ -1,5 +1,3 @@
-// src/App.jsx
-
 import React, { useState, useEffect, useRef } from 'react';
 import { Send, User, Bot, ArrowLeft, Loader2, Sparkles, AlertCircle, Compass } from 'lucide-react';
 import { classifyIntentHybrid } from './ai/intent-classifier';
@@ -38,7 +36,7 @@ export default function App() {
   const [loadingKB, setLoadingKB] = useState(true);
   const [isProcessing, setIsProcessing] = useState(false);
   const [suggestions, setSuggestions] = useState([]);
-  
+
   const retrieverRef = useRef(new BM25Retriever());
   const messagesEndRef = useRef(null);
 
@@ -60,10 +58,20 @@ export default function App() {
         }
 
         retrieverRef.current.index(chunks);
+
+        // Асинхронно строим эмбеддинги (не блокируем UI)
+        retrieverRef.current
+          .buildEmbeddingIndex()
+          .catch((e) => console.warn('[App] Embedding index build failed:', e));
+
         setLoadingKB(false);
       } catch (err) {
         console.error('[Knowledge Base] Critical error initializing knowledge base:', err);
         retrieverRef.current.index(seedData);
+        // Построим эмбеддинги и для fallback-набора
+        retrieverRef.current
+          .buildEmbeddingIndex()
+          .catch((e) => console.warn('[App] Embedding index build failed (fallback):', e));
         setLoadingKB(false);
       }
     };
@@ -128,11 +136,16 @@ export default function App() {
         method: classification.method
       });
 
-      // 2. Layer 2: BM25 Retrieval
-      const searchResults = retrieverRef.current.search(query, 5, role || 'Студент');
+      // 2. Layer 2: Hybrid Retrieval (BM25 + semantic)
+      const searchResults = await retrieverRef.current.searchHybrid(
+        query,
+        5,
+        role || 'Студент',
+        0.6 // вес BM25; 1 - 0.6 = 0.4 — вес семантики
+      );
       const topChunks = searchResults.map(r => r.chunk);
       const bestScore = searchResults.length > 0 ? searchResults[0].score : 0;
-      
+
       console.log(`[AI Core] Retrieved ${searchResults.length} chunks. Best score: ${bestScore.toFixed(3)}`);
       if (searchResults.length > 0) {
         console.log('[AI Core] Top chunks:', searchResults.slice(0, 3));
@@ -142,14 +155,12 @@ export default function App() {
       let candidateResponse = '';
       let usedGroq = false;
 
-      // Try Groq LLM whenever there are retrieved chunks and the query is not trivially answerable,
-      // OR when confidence is low OR intent is unknown OR retrieval is relevant enough.
       if (
         CONFIG.GROQ_PROXY_URL &&
         topChunks.length > 0 &&
         (classification.confidence < CONFIG.LOW_CONFIDENCE_THRESHOLD ||
          classification.intent === 'unknown' ||
-         (bestScore >= 0.5 && bestScore >= CONFIG.MIN_RELEVANCE_SCORE)  )
+         (bestScore >= 0.5 && bestScore >= CONFIG.MIN_RELEVANCE_SCORE))
       ) {
         console.log('[AI Core] Attempting Groq LLM proxy...');
         const groqResult = await queryGroqLLM(query, topChunks, role || 'Студент');
@@ -162,7 +173,6 @@ export default function App() {
 
       // If Groq wasn't used or failed, use human-crafted response templates
       if (!candidateResponse) {
-        // If retrieval score is below minimal relevance threshold and intent is unknown, mark unknown
         const finalIntent = (bestScore < CONFIG.MIN_RELEVANCE_SCORE && classification.intent === 'unknown')
           ? 'unknown'
           : classification.intent;
@@ -232,7 +242,7 @@ export default function App() {
             <h1 className="text-2xl font-extrabold text-slate-900 mb-1">Інтелектуальний помічник ХАІ</h1>
             <p className="text-sm text-slate-500">Національний аерокосмічний університет</p>
           </div>
-          
+
           <p className="text-xs font-semibold uppercase tracking-wider text-slate-400 mb-3 text-center">
             Оберіть вашу роль
           </p>
@@ -273,8 +283,8 @@ export default function App() {
       {/* Header */}
       <div className="bg-gradient-to-r from-blue-900 via-indigo-900 to-blue-800 text-white px-5 py-4 flex items-center justify-between shadow-md z-10">
         <div className="flex items-center space-x-3">
-          <button 
-            onClick={() => setRole(null)} 
+          <button
+            onClick={() => setRole(null)}
             className="p-2 hover:bg-white/10 rounded-xl transition-colors text-slate-200 hover:text-white"
             title="Змінити роль"
           >
@@ -300,16 +310,16 @@ export default function App() {
             <div key={idx} className={`flex ${msg.sender === 'user' ? 'justify-end' : 'justify-start'}`}>
               <div className={`flex max-w-[90%] sm:max-w-[80%] ${msg.sender === 'user' ? 'flex-row-reverse' : 'flex-row'}`}>
                 <div className={`flex-shrink-0 h-9 w-9 rounded-2xl flex items-center justify-center mt-1 shadow-sm ${
-                  msg.sender === 'user' 
-                    ? 'bg-blue-600 ml-3 text-white' 
+                  msg.sender === 'user'
+                    ? 'bg-blue-600 ml-3 text-white'
                     : 'bg-gradient-to-br from-slate-800 to-indigo-950 mr-3 text-amber-300'
                 }`}>
                   {msg.sender === 'user' ? <User size={18} /> : <Bot size={18} />}
                 </div>
 
                 <div className={`p-4 sm:p-5 rounded-3xl shadow-sm ${
-                  msg.sender === 'user' 
-                    ? 'bg-blue-600 text-white rounded-tr-none' 
+                  msg.sender === 'user'
+                    ? 'bg-blue-600 text-white rounded-tr-none'
                     : 'bg-white border border-slate-200/80 rounded-tl-none text-slate-800'
                 }`}>
                   <div className="whitespace-pre-wrap leading-relaxed text-sm sm:text-base">
