@@ -13,9 +13,12 @@ RULES:
 6. End with the most relevant source URL.`;
 
 function buildUserPrompt(query: string, chunks: KnowledgeChunk[], role: string): string {
-  const contextStr = chunks.slice(0, 3).map((c, i) => {
-    return `[Джерело ${i + 1} (${c.source_url})]:\n${c.text}`;
-  }).join('\n\n');
+  const contextStr = chunks
+    .slice(0, 5)
+    .map((c, i) => {
+      return `[Джерело ${i + 1} (${c.source_url})]:\n${c.text}`;
+    })
+    .join('\n\n');
 
   return `Офіційний контекст ХАІ:
 ${contextStr}
@@ -23,7 +26,13 @@ ${contextStr}
 Роль користувача: ${role}
 Запитання користувача: ${query}
 
-Сформуй чітку, структуровану відповідь українською мовою на основі наданого контексту.`;
+ІНСТРУКЦІЇ:
+1. Дай розгорнуту, структуровану відповідь українською мовою.
+2. Використовуй списки, виділення жирним, емодзі для структури.
+3. Якщо в контексті є конкретні дати, номери, назви — обов'язково наведи їх.
+4. Якщо контекст неповний, чесно скажи, чого не вистачає, і запропонуй, куди звернутися.
+5. В кінці додай 1-3 найрелевантніші посилання з контексту.
+6. Не вигадуй факти, яких немає в контексті.`;
 }
 
 export async function queryGroqLLM(
