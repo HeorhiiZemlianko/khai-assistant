@@ -1,4 +1,4 @@
-import { classifyWithLLM, LLMClassificationResult } from './llm-groq';
+import { classifyWithLLM } from './llm-groq';
 
 export interface ExtractedEntities {
   group?: string;
@@ -14,6 +14,13 @@ export interface ClassificationResult {
   intent: string;
   entities: ExtractedEntities;
   confidence: number;
+}
+
+export interface HybridClassificationResult {
+  intent: string;
+  entities: ExtractedEntities;
+  confidence: number;
+  method: 'rules' | 'llm';
 }
 
 // Typo correction map
@@ -305,34 +312,40 @@ export function classifyIntent(query: string, role: string = 'Студент'): 
   };
 }
 
-export interface HybridClassificationResult {
-  intent: string;
-  entities: ExtractedEntities;
-  confidence: number;
-  method: 'rules' | 'llm';
-}
+const classificationCache = new Map<string, HybridClassificationResult>();
+const MAX_CACHE_SIZE = 500; // защита от неограниченного роста
 
 /**
  * Hybrid classification: rules first, LLM fallback for low-confidence cases.
+ * Результаты кешируются по ключу `role::query` (lowercase, trimmed).
  */
 export async function classifyIntentHybrid(
   query: string,
   role: string,
   confidenceThreshold: number = 0.5
 ): Promise<HybridClassificationResult> {
-  // Step 1: Try rule-based classification
-  const ruleResult = classifyIntent(query, role);
+  const cacheKey = `${role}::${query.toLowerCase().trim()}`;
 
+  // ── Cache lookup ──────────────────────────────────────────
+  if (classificationCache.has(cacheKey)) {
+    console.log('[NLU] Cache hit');
+    return classificationCache.get(cacheKey)!;
+  }
+
+  // ── Step 1: Try rule-based classification ─────────────────
+  const ruleResult = classifyIntent(query, role);
   console.log(
     `[NLU] Rules result: intent=${ruleResult.intent}, confidence=${ruleResult.confidence.toFixed(2)}`
   );
 
-  // Step 2: If rules are confident enough, use them
+  // ── Step 2: If rules are confident enough, use them ───────
   if (ruleResult.confidence >= confidenceThreshold && ruleResult.intent !== 'unknown') {
-    return { ...ruleResult, method: 'rules' };
+    const result: HybridClassificationResult = { ...ruleResult, method: 'rules' };
+    cacheSet(cacheKey, result);
+    return result;
   }
 
-  // Step 3: Fallback to LLM for ambiguous or unknown queries
+  // ── Step 3: Fallback to LLM for ambiguous / unknown ───────
   console.log('[NLU] Rules confidence low, falling back to LLM...');
   const llmResult = await classifyWithLLM(query, role);
 
@@ -340,15 +353,36 @@ export async function classifyIntentHybrid(
     console.log(
       `[NLU] LLM result: intent=${llmResult.intent}, confidence=${llmResult.confidence.toFixed(2)}`
     );
-    return {
+    const result: HybridClassificationResult = {
       intent: llmResult.intent,
       entities: llmResult.entities as ExtractedEntities,
       confidence: llmResult.confidence,
       method: 'llm',
     };
+    cacheSet(cacheKey, result);
+    return result;
   }
 
-  // Step 4: Both failed — return unknown with original entities
+  // ── Step 4: Both failed — return unknown ──────────────────
   console.log('[NLU] LLM also failed, returning unknown');
-  return { ...ruleResult, intent: 'unknown', method: 'rules' };
+  const fallback: HybridClassificationResult = {
+    ...ruleResult,
+    intent: 'unknown',
+    method: 'rules',
+  };
+  cacheSet(cacheKey, fallback);
+  return fallback;
+}
+
+/**
+ * Простая LRU-подобная вставка: при превышении лимита удаляем самый старый ключ.
+ */
+function cacheSet(key: string, value: HybridClassificationResult): void {
+  if (classificationCache.size >= MAX_CACHE_SIZE) {
+    const firstKey = classificationCache.keys().next().value;
+    if (firstKey !== undefined) {
+      classificationCache.delete(firstKey);
+    }
+  }
+  classificationCache.set(key, value);
 }
