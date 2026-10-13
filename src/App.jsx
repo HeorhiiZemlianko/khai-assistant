@@ -149,7 +149,7 @@ export default function App() {
         topChunks.length > 0 &&
         (classification.confidence < CONFIG.LOW_CONFIDENCE_THRESHOLD ||
          classification.intent === 'unknown' ||
-         bestScore >= 0.5 and bestScore >= CONFIG.MIN_RELEVANCE_SCORE  )
+         (bestScore >= 0.5 && bestScore >= CONFIG.MIN_RELEVANCE_SCORE)  )
       ) {
         console.log('[AI Core] Attempting Groq LLM proxy...');
         const groqResult = await queryGroqLLM(query, topChunks, role || 'Студент');
