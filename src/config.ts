@@ -5,7 +5,7 @@ export const CONFIG = {
   GROQ_PROXY_URL: import.meta.env.VITE_GROQ_PROXY_URL || 'https://khai-groq-proxy.kibranec2.workers.dev',
   
   // Model name used in Groq
-  GROQ_MODEL: "llama-3.3-70b-versatile",
+  GROQ_MODEL: "openai/gpt-oss-120b",
   
   // Threshold for classification confidence below which Groq or fallback is considered
   LOW_CONFIDENCE_THRESHOLD: 0.4,
