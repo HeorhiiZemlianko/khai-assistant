@@ -1,3 +1,5 @@
+import { classifyWithLLM, LLMClassificationResult } from './llm-groq';
+
 export interface ExtractedEntities {
   group?: string;
   teacher?: string;
@@ -301,4 +303,52 @@ export function classifyIntent(query: string, role: string = 'Студент'): 
     entities,
     confidence: Math.min(1.0, maxScore)
   };
+}
+
+export interface HybridClassificationResult {
+  intent: string;
+  entities: ExtractedEntities;
+  confidence: number;
+  method: 'rules' | 'llm';
+}
+
+/**
+ * Hybrid classification: rules first, LLM fallback for low-confidence cases.
+ */
+export async function classifyIntentHybrid(
+  query: string,
+  role: string,
+  confidenceThreshold: number = 0.5
+): Promise<HybridClassificationResult> {
+  // Step 1: Try rule-based classification
+  const ruleResult = classifyIntent(query, role);
+
+  console.log(
+    `[NLU] Rules result: intent=${ruleResult.intent}, confidence=${ruleResult.confidence.toFixed(2)}`
+  );
+
+  // Step 2: If rules are confident enough, use them
+  if (ruleResult.confidence >= confidenceThreshold && ruleResult.intent !== 'unknown') {
+    return { ...ruleResult, method: 'rules' };
+  }
+
+  // Step 3: Fallback to LLM for ambiguous or unknown queries
+  console.log('[NLU] Rules confidence low, falling back to LLM...');
+  const llmResult = await classifyWithLLM(query, role);
+
+  if (llmResult) {
+    console.log(
+      `[NLU] LLM result: intent=${llmResult.intent}, confidence=${llmResult.confidence.toFixed(2)}`
+    );
+    return {
+      intent: llmResult.intent,
+      entities: llmResult.entities as ExtractedEntities,
+      confidence: llmResult.confidence,
+      method: 'llm',
+    };
+  }
+
+  // Step 4: Both failed — return unknown with original entities
+  console.log('[NLU] LLM also failed, returning unknown');
+  return { ...ruleResult, intent: 'unknown', method: 'rules' };
 }
