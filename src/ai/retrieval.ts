@@ -1,3 +1,5 @@
+import { embedText, cosineSimilarity } from './embeddings';
+
 export interface KnowledgeChunk {
   id: string;
   title?: string;
@@ -35,6 +37,9 @@ export class BM25Retriever {
   private avgdl: number = 0;
   private n: number = 0;
 
+  private embeddings: Float32Array[] = [];
+  private embeddingsIndexed = false;
+
   constructor() {}
 
   public index(documents: KnowledgeChunk[]): void {
@@ -45,6 +50,10 @@ export class BM25Retriever {
     this.df = {};
     this.docLengths = [];
 
+    // при переиндексации сбрасываем эмбеддинги
+    this.embeddings = [];
+    this.embeddingsIndexed = false;
+
     let totalLength = 0;
     const categoriesSet = new Set<string>();
 
@@ -54,11 +63,11 @@ export class BM25Retriever {
       const titleToks = tokenize(doc.title || '');
       const textToks = tokenize(doc.text || '');
       const kwToks = doc.keywords ? doc.keywords.flatMap(kw => tokenize(kw)) : [];
-      
+
       const allTokens = [...titleToks, ...textToks, ...kwToks];
       this.docTokens.push(allTokens);
       this.titleTokens.push(titleToks);
-      
+
       const length = allTokens.length;
       this.docLengths.push(length);
       totalLength += length;
@@ -101,10 +110,10 @@ export class BM25Retriever {
 
         const numerator = tf * (K1 + 1);
         const denominator = tf + K1 * (1 - B + B * (this.docLengths[i] / (this.avgdl || 1)));
-        
+
         let termScore = idf * (numerator / denominator) * titleWeightBoost;
 
-        // Role adjustment: boost if role matches, slight penalty if explicit mismatch
+        // Role adjustment
         if (doc.roles && doc.roles.length > 0) {
           if (doc.roles.includes(role) || doc.roles.includes('Всі')) {
             termScore *= 1.3;
@@ -117,7 +126,6 @@ export class BM25Retriever {
       }
     });
 
-    // Map, sort, and filter
     const results: SearchResult[] = scores
       .map((score, index) => ({
         score,
@@ -128,5 +136,102 @@ export class BM25Retriever {
       .slice(0, topK);
 
     return results;
+  }
+
+  /**
+   * Асинхронная индексация эмбеддингов для всех чанков.
+   * Вызывать после index(documents).
+   */
+  async buildEmbeddingIndex(): Promise<void> {
+    if (this.embeddingsIndexed) return;
+
+    console.log('[Retrieval] Building embedding index...');
+    const start = Date.now();
+
+    this.embeddings = [];
+
+    for (let i = 0; i < this.documents.length; i++) {
+      const chunk = this.documents[i];
+      const text = `${chunk.title || ''} ${chunk.text}`.trim();
+
+      try {
+        const vec = await embedText(text);
+        this.embeddings.push(vec);
+      } catch (err) {
+        console.warn(`[Retrieval] Failed to embed chunk ${i}:`, err);
+        // fallback-нулевой вектор; размер должен совпадать с размерностью embedText
+        this.embeddings.push(new Float32Array(384));
+      }
+    }
+
+    this.embeddingsIndexed = true;
+    console.log(`[Retrieval] Embedding index built in ${Date.now() - start}ms`);
+  }
+
+  /**
+   * Гибридный поиск: BM25 + семантическое сходство.
+   * @param alpha Вес BM25 (0..1). 1 = только BM25, 0 = только семантика.
+   */
+  async searchHybrid(
+    query: string,
+    topK: number = 5,
+    role: string = 'Студент',
+    alpha: number = 0.6
+  ): Promise<SearchResult[]> {
+    // 1. BM25-результаты (берём с запасом)
+    const bm25Results = this.search(query, topK * 2, role);
+
+    // 2. Если эмбеддинги не построены — вернуть только BM25
+    if (!this.embeddingsIndexed || this.embeddings.length === 0) {
+      console.log('[Retrieval] Embeddings not ready, using BM25 only');
+      return bm25Results.slice(0, topK);
+    }
+
+    // 3. Эмбеддинг запроса
+    const queryVec = await embedText(query);
+
+    // 4. Семантические оценки для всех чанков
+    const semanticScores: number[] = this.embeddings.map((emb) =>
+      cosineSimilarity(queryVec, emb)
+    );
+
+    // 5. Нормализация BM25-оценок в [0, 1]
+    const maxBm25 = Math.max(...bm25Results.map((r) => r.score), 1e-6);
+    const bm25Map = new Map<number, number>();
+
+    const idToIndex = new Map<string, number>();
+    this.documents.forEach((doc, idx) => idToIndex.set(doc.id, idx));
+
+    bm25Results.forEach((r) => {
+      const idx = idToIndex.get(r.chunk.id);
+      if (idx !== undefined) {
+        bm25Map.set(idx, r.score / maxBm25);
+      }
+    });
+
+    // 6. Нормализация семантических оценок в [0, 1]
+    const minSem = Math.min(...semanticScores);
+    const maxSem = Math.max(...semanticScores, 1e-6);
+    const semRange = maxSem - minSem || 1;
+
+    // 7. Объединённая оценка
+    const combined: SearchResult[] = [];
+
+    for (let i = 0; i < this.documents.length; i++) {
+      const bm25Norm = bm25Map.get(i) ?? 0;
+      const semNorm = (semanticScores[i] - minSem) / semRange;
+      const finalScore = alpha * bm25Norm + (1 - alpha) * semNorm;
+
+      if (finalScore > 0.01) {
+        combined.push({
+          score: finalScore,
+          chunk: this.documents[i]
+        });
+      }
+    }
+
+    // 8. Сортировка и топ-K
+    combined.sort((a, b) => b.score - a.score);
+    return combined.slice(0, topK);
   }
 }
