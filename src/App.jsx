@@ -11,7 +11,7 @@ import { CONFIG } from './config.ts';
 import seedData from './data/seed-knowledge.json';
 import { AgentCore } from './ai/agent-core.ts';
 import { ConversationMemory } from './ai/conversation-memory.ts';
-import { onModelStatus } from './ai/embeddings.ts';   // ← добавили
+import { onModelStatus } from './ai/embeddings.ts';
 
 const ROLES = {
   STUDENT: 'Студент',
@@ -34,6 +34,9 @@ const SMART_SUGGESTIONS = {
   documents: ['Як отримати довідку про навчання?', 'Які документи потрібні для гуртожитку?']
 };
 
+// Порог релевантності (Шаг 5.3)
+const MIN_RELEVANCE = 0.35;
+
 export default function App() {
   const [role, setRole] = useState(null);
   const [messages, setMessages] = useState([]);
@@ -46,7 +49,7 @@ export default function App() {
   const [modelStatus, setModelStatus] = useState('idle');
 
   const retrieverRef = useRef(new BM25Retriever());
-  const memoryRef = useRef(new ConversationMemory(10)); // храним последние 10 сообщений
+  const memoryRef = useRef(new ConversationMemory(10));
   const agentRef = useRef(null);
   const messagesEndRef = useRef(null);
 
@@ -167,9 +170,33 @@ export default function App() {
       console.log('[Agent] Parsed date:', agentResult.parsedDate);
 
       const { classification, resolvedEntities, searchResults, finalQuery } = agentResult;
-      const topChunks = searchResults.map(r => r.chunk);
-      const bestScore = searchResults.length > 0 ? searchResults[0].score : 0;
 
+      // ── Шаг 5.3: Строгая фильтрация нерелевантных результатов ──
+      const relevantResults = searchResults.filter(r => r.score >= MIN_RELEVANCE);
+      const topChunks = relevantResults.slice(0, 3).map(r => r.chunk);
+      const bestScore = relevantResults.length > 0 ? relevantResults[0].score : 0;
+
+      // Если ничего релевантного не нашли — честно сообщаем и выходим
+      if (topChunks.length === 0) {
+        const fallbackText = `На жаль, я не знайшов точної інформації за вашим запитом у базі знань ХАІ.\n\nСпробуйте переформулювати питання або зверніться до офіційного порталу: https://khai.edu`;
+
+        memoryRef.current.add({
+          sender: 'bot',
+          text: fallbackText,
+          intent: classification.intent,
+          entities: resolvedEntities,
+          timestamp: Date.now(),
+        });
+
+        setMessages(prev => [
+          ...prev,
+          { sender: 'bot', text: fallbackText },
+        ]);
+        setIsProcessing(false);
+        return;
+      }
+
+      // ── Генерация ответа (LLM или шаблон) ──────────────────────
       let candidateResponse = '';
       let usedGroq = false;
 
@@ -180,6 +207,7 @@ export default function App() {
           classification.intent === 'unknown' ||
           bestScore >= CONFIG.MIN_RELEVANCE_SCORE)
       ) {
+        // ── Шаг 5.2: передаём дату, историю и распознанные сущности ──
         const history = memoryRef.current.getHistory().slice(-6);
         const groqResult = await queryGroqLLM(
           finalQuery,
@@ -196,9 +224,10 @@ export default function App() {
       }
 
       if (!candidateResponse) {
-        const finalIntent = (bestScore < CONFIG.MIN_RELEVANCE_SCORE && classification.intent === 'unknown')
-          ? 'unknown'
-          : classification.intent;
+        const finalIntent =
+          bestScore < CONFIG.MIN_RELEVANCE_SCORE && classification.intent === 'unknown'
+            ? 'unknown'
+            : classification.intent;
         candidateResponse = generateTemplateResponse(
           finalIntent,
           resolvedEntities,
@@ -208,6 +237,7 @@ export default function App() {
         );
       }
 
+      // ── Quality Gate ───────────────────────────────────────────
       const validation = validateResponse(candidateResponse);
       let finalResponse = candidateResponse;
       if (!validation.isValid) {
