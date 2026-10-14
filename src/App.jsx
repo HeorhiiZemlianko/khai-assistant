@@ -1,14 +1,14 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { Send, User, Bot, ArrowLeft, Loader2, Sparkles, AlertCircle, Compass } from 'lucide-react';
-import { classifyIntentHybrid } from './ai/intent-classifier';
+import { classifyIntentHybrid } from './ai/intent-classifier.ts';
 import { BM25Retriever } from './ai/retrieval';
 import { generateTemplateResponse } from './ai/response-templates';
 import { validateResponse } from './ai/quality-gate';
 import { queryGroqLLM } from './ai/llm-groq';
 import { CONFIG } from './config';
 import seedData from './data/seed-knowledge.json';
-import { AgentCore } from './ai/agent-core';
-import { ConversationMemory } from './ai/conversation-memory';
+import { AgentCore } from './ai/agent-core.ts';
+import { ConversationMemory } from './ai/conversation-memory.ts';
 
 const ROLES = {
   STUDENT: 'Студент',
