@@ -1,4 +1,4 @@
-import { embedText, cosineSimilarity } from './embeddings';
+import { embedBatch, cosineSimilarity } from './embeddings';
 
 export interface KnowledgeChunk {
   id: string;
@@ -139,29 +139,25 @@ export class BM25Retriever {
   }
 
   /**
-   * Асинхронная индексация эмбеддингов для всех чанков.
+   * Асинхронная индексация эмбеддингов для всех чанков (батчами).
    * Вызывать после index(documents).
    */
   async buildEmbeddingIndex(): Promise<void> {
     if (this.embeddingsIndexed) return;
-
     console.log('[Retrieval] Building embedding index...');
     const start = Date.now();
 
+    const texts = this.documents.map(
+      (chunk) => `${chunk.title || ''} ${chunk.text}`.trim()
+    );
+
+    const BATCH_SIZE = 8;
     this.embeddings = [];
-
-    for (let i = 0; i < this.documents.length; i++) {
-      const chunk = this.documents[i];
-      const text = `${chunk.title || ''} ${chunk.text}`.trim();
-
-      try {
-        const vec = await embedText(text);
-        this.embeddings.push(vec);
-      } catch (err) {
-        console.warn(`[Retrieval] Failed to embed chunk ${i}:`, err);
-        // fallback-нулевой вектор; размер должен совпадать с размерностью embedText
-        this.embeddings.push(new Float32Array(384));
-      }
+    for (let i = 0; i < texts.length; i += BATCH_SIZE) {
+      const batch = texts.slice(i, i + BATCH_SIZE);
+      const vecs = await embedBatch(batch);
+      this.embeddings.push(...vecs);
+      console.log(`[Retrieval] Embedded ${Math.min(i + BATCH_SIZE, texts.length)}/${texts.length}`);
     }
 
     this.embeddingsIndexed = true;
@@ -187,8 +183,9 @@ export class BM25Retriever {
       return bm25Results.slice(0, topK);
     }
 
-    // 3. Эмбеддинг запроса
-    const queryVec = await embedText(query);
+    // 3. Эмбеддинг запроса (одиночный — через embedBatch удобнее не гонять,
+    //    но т.к. embedText убран из импорта, используем embedBatch([query]))
+    const [queryVec] = await embedBatch([query]);
 
     // 4. Семантические оценки для всех чанков
     const semanticScores: number[] = this.embeddings.map((emb) =>
