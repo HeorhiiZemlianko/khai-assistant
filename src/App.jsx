@@ -180,7 +180,15 @@ export default function App() {
           classification.intent === 'unknown' ||
           bestScore >= CONFIG.MIN_RELEVANCE_SCORE)
       ) {
-        const groqResult = await queryGroqLLM(finalQuery, topChunks, role || 'Студент');
+        const history = memoryRef.current.getHistory().slice(-6);
+        const groqResult = await queryGroqLLM(
+          finalQuery,
+          topChunks,
+          role || 'Студент',
+          agentResult.parsedDate,
+          history,
+          agentResult.resolvedEntities
+        );
         if (groqResult) {
           candidateResponse = groqResult;
           usedGroq = true;
