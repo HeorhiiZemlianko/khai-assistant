@@ -2,6 +2,30 @@ let worker: Worker | null = null;
 let messageId = 0;
 const pending = new Map<number, { resolve: Function; reject: Function }>();
 
+type StatusListener = (status: string) => void;
+const statusListeners = new Set<StatusListener>();
+
+/**
+ * Подписка на статусы загрузки модели из Worker.
+ * @returns функция отписки
+ */
+export function onModelStatus(listener: StatusListener): () => void {
+  statusListeners.add(listener);
+  return () => {
+    statusListeners.delete(listener);
+  };
+}
+
+function emitStatus(status: string): void {
+  for (const fn of statusListeners) {
+    try {
+      fn(status);
+    } catch (e) {
+      console.error('[Embeddings] status listener error:', e);
+    }
+  }
+}
+
 /**
  * Ленивая инициализация Web Worker для эмбеддингов.
  * Worker загружает модель paraphrase-multilingual-MiniLM-L12-v2
@@ -20,6 +44,7 @@ function getWorker(): Worker {
     // Служебные сообщения о статусе (загрузка модели и т.п.)
     if (type === 'status') {
       console.log(`[Embeddings Worker] ${status}`);
+      emitStatus(status);
       return;
     }
 
