@@ -1,4 +1,3 @@
-// src/ai/llm-groq.ts
 import { CONFIG } from '../config';
 import { KnowledgeChunk } from './retrieval';
 
