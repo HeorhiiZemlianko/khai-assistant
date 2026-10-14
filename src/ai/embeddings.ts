@@ -1,39 +1,61 @@
-import { pipeline, env } from '@xenova/transformers';
-
-// Разрешаем загрузку моделей с Hugging Face CDN (по умолчанию)
-env.allowRemoteModels = true;
-env.allowLocalModels = false;
-
-let embedderPipeline: any = null;
-let isInitializing = false;
+let worker: Worker | null = null;
+let messageId = 0;
+const pending = new Map<number, { resolve: Function; reject: Function }>();
 
 /**
- * Ленивая инициализация пайплайна эмбеддингов.
- * Модель: paraphrase-multilingual-MiniLM-L12-v2 — поддерживает украинский.
+ * Ленивая инициализация Web Worker для эмбеддингов.
+ * Worker загружает модель paraphrase-multilingual-MiniLM-L12-v2
+ * (поддерживает украинский), чтобы не блокировать главный поток.
  */
-async function getEmbedder() {
-  if (embedderPipeline) return embedderPipeline;
-  if (isInitializing) {
-    // Ждём, пока инициализация завершится
-    while (isInitializing) {
-      await new Promise(r => setTimeout(r, 100));
-    }
-    return embedderPipeline;
-  }
+function getWorker(): Worker {
+  if (worker) return worker;
 
-  isInitializing = true;
-  try {
-    console.log('[Embeddings] Loading model...');
-    embedderPipeline = await pipeline(
-      'feature-extraction',
-      'Xenova/paraphrase-multilingual-MiniLM-L12-v2',
-      { quantized: true } // 8-bit квантизация для меньшего размера
-    );
-    console.log('[Embeddings] Model loaded');
-  } finally {
-    isInitializing = false;
-  }
-  return embedderPipeline;
+  worker = new Worker(new URL('../workers/embeddings.worker.ts', import.meta.url), {
+    type: 'module',
+  });
+
+  worker.onmessage = (event) => {
+    const { type, id, vector, vectors, error, status } = event.data;
+
+    // Служебные сообщения о статусе (загрузка модели и т.п.)
+    if (type === 'status') {
+      console.log(`[Embeddings Worker] ${status}`);
+      return;
+    }
+
+    const handler = pending.get(id);
+    if (!handler) return;
+    pending.delete(id);
+
+    if (error) {
+      handler.reject(new Error(error));
+    } else if (vector) {
+      handler.resolve(new Float32Array(vector));
+    } else if (vectors) {
+      handler.resolve(vectors.map((v: number[]) => new Float32Array(v)));
+    } else {
+      handler.reject(new Error('Unknown worker response'));
+    }
+  };
+
+  worker.onerror = (err) => {
+    console.error('[Embeddings Worker] error:', err);
+    // Отклоняем все ожидающие промисы
+    for (const [id, handler] of pending) {
+      handler.reject(new Error(err.message || 'Worker error'));
+      pending.delete(id);
+    }
+  };
+
+  return worker;
+}
+
+function sendToWorker(type: string, payload: any): Promise<any> {
+  return new Promise((resolve, reject) => {
+    const id = ++messageId;
+    pending.set(id, { resolve, reject });
+    getWorker().postMessage({ type, payload: { ...payload, id } });
+  });
 }
 
 /**
@@ -41,12 +63,15 @@ async function getEmbedder() {
  * @returns Float32Array нормализованный вектор
  */
 export async function embedText(text: string): Promise<Float32Array> {
-  const embedder = await getEmbedder();
-  const output = await embedder(text, {
-    pooling: 'mean',
-    normalize: true,
-  });
-  return output.data as Float32Array;
+  return sendToWorker('embed', { text });
+}
+
+/**
+ * Получить эмбеддинги для массива текстов (батчем).
+ * @returns массив нормализованных векторов
+ */
+export async function embedBatch(texts: string[]): Promise<Float32Array[]> {
+  return sendToWorker('embed_batch', { texts });
 }
 
 /**
@@ -55,8 +80,6 @@ export async function embedText(text: string): Promise<Float32Array> {
  */
 export function cosineSimilarity(a: Float32Array, b: Float32Array): number {
   let dot = 0;
-  for (let i = 0; i < a.length; i++) {
-    dot += a[i] * b[i];
-  }
+  for (let i = 0; i < a.length; i++) dot += a[i] * b[i];
   return dot;
 }
