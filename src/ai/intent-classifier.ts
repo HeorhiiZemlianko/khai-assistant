@@ -322,7 +322,8 @@ const MAX_CACHE_SIZE = 500; // защита от неограниченного 
 export async function classifyIntentHybrid(
   query: string,
   role: string,
-  confidenceThreshold: number = 0.5
+  confidenceThreshold: number = 0.5,
+  history?: Array<{ sender: string; text: string }>
 ): Promise<HybridClassificationResult> {
   const cacheKey = `${role}::${query.toLowerCase().trim()}`;
 
@@ -347,7 +348,7 @@ export async function classifyIntentHybrid(
 
   // ── Step 3: Fallback to LLM for ambiguous / unknown ───────
   console.log('[NLU] Rules confidence low, falling back to LLM...');
-  const llmResult = await classifyWithLLM(query, role);
+  const llmResult = await classifyWithLLM(query, role, history);
 
   if (llmResult) {
     console.log(
