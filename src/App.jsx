@@ -11,6 +11,7 @@ import { CONFIG } from './config.ts';
 import seedData from './data/seed-knowledge.json';
 import { AgentCore } from './ai/agent-core.ts';
 import { ConversationMemory } from './ai/conversation-memory.ts';
+import { onModelStatus } from './ai/embeddings.ts';   // ← добавили
 
 const ROLES = {
   STUDENT: 'Студент',
@@ -41,10 +42,21 @@ export default function App() {
   const [isProcessing, setIsProcessing] = useState(false);
   const [suggestions, setSuggestions] = useState([]);
 
+  // ── Статус семантичної моделі ─────────────────────
+  const [modelStatus, setModelStatus] = useState('idle');
+
   const retrieverRef = useRef(new BM25Retriever());
   const memoryRef = useRef(new ConversationMemory(10)); // храним последние 10 сообщений
   const agentRef = useRef(null);
   const messagesEndRef = useRef(null);
+
+  // ── Подписка на статусы загрузки модели из воркера ──────────
+  useEffect(() => {
+    const unsubscribe = onModelStatus((status) => {
+      setModelStatus(status);
+    });
+    return unsubscribe;
+  }, []);
 
   useEffect(() => {
     // Load Knowledge Base: combine seed facts + scraped chunks
@@ -74,7 +86,6 @@ export default function App() {
       } catch (err) {
         console.error('[Knowledge Base] Critical error initializing knowledge base:', err);
         retrieverRef.current.index(seedData);
-        // Построим эмбеддинги и для fallback-набора
         retrieverRef.current
           .buildEmbeddingIndex()
           .catch((e) => console.warn('[App] Embedding index build failed (fallback):', e));
@@ -103,7 +114,6 @@ export default function App() {
 
   const handleRoleSelect = (selectedRole) => {
     setRole(selectedRole);
-    // Очищаем память при смене роли, чтобы не тащить контекст прошлой сессии
     memoryRef.current.clear?.();
     setMessages([{
       sender: 'bot',
@@ -141,7 +151,6 @@ export default function App() {
     setSuggestions([]);
     setMessages(prev => [...prev, { sender: 'user', text: query }]);
 
-    // Сохраняем сообщение пользователя в память
     memoryRef.current.add({
       sender: 'user',
       text: query,
@@ -151,10 +160,8 @@ export default function App() {
     setIsProcessing(true);
 
     try {
-      // ── Запуск агента ──────────────────────────────────────────
       const agentResult = await agentRef.current.process(query, role || 'Студент');
 
-      // Логируем шаги агента
       console.log('[Agent] Steps:', agentResult.steps);
       console.log('[Agent] Resolved entities:', agentResult.resolvedEntities);
       console.log('[Agent] Parsed date:', agentResult.parsedDate);
@@ -163,7 +170,6 @@ export default function App() {
       const topChunks = searchResults.map(r => r.chunk);
       const bestScore = searchResults.length > 0 ? searchResults[0].score : 0;
 
-      // ── Генерация ответа (LLM или шаблон) ──────────────────────
       let candidateResponse = '';
       let usedGroq = false;
 
@@ -194,7 +200,6 @@ export default function App() {
         );
       }
 
-      // ── Quality Gate ───────────────────────────────────────────
       const validation = validateResponse(candidateResponse);
       let finalResponse = candidateResponse;
       if (!validation.isValid) {
@@ -211,7 +216,6 @@ export default function App() {
         new Set(topChunks.map(c => c.source_url).filter(Boolean))
       ).slice(0, 3);
 
-      // Сохраняем ответ бота в память
       memoryRef.current.add({
         sender: 'bot',
         text: finalResponse,
@@ -273,7 +277,8 @@ export default function App() {
             ))}
           </div>
 
-          <div className="border-t border-slate-100 pt-4 text-center">
+          {/* ── Статусы инициализации ─────────────────── */}
+          <div className="border-t border-slate-100 pt-4 text-center space-y-2">
             {loadingKB ? (
               <div className="flex items-center justify-center text-xs text-slate-400 gap-2">
                 <Loader2 className="animate-spin text-blue-500" size={14} />
@@ -283,6 +288,18 @@ export default function App() {
               <div className="text-xs text-emerald-600 font-medium flex items-center justify-center gap-1.5">
                 <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse"></span>
                 <span>База знань ХАІ готова до роботи</span>
+              </div>
+            )}
+
+            {modelStatus === 'loading_model' && (
+              <div className="flex items-center justify-center text-xs text-blue-500 gap-1.5">
+                <Loader2 className="animate-spin" size={12} />
+                <span>🤖 Завантаження семантичної моделі...</span>
+              </div>
+            )}
+            {modelStatus === 'model_loaded' && (
+              <div className="flex items-center justify-center text-xs text-green-600 gap-1.5">
+                <span>✅ Семантичний пошук готовий</span>
               </div>
             )}
           </div>
@@ -310,9 +327,25 @@ export default function App() {
             <p className="text-xs text-blue-200 font-medium">Роль: <span className="text-white font-semibold">{role}</span></p>
           </div>
         </div>
+
+        {/* ── Индикатор модели в хедере ──────────────── */}
         <div className="hidden sm:flex items-center gap-2 bg-white/10 px-3 py-1 rounded-full text-xs text-blue-100">
-          <span className="w-2 h-2 rounded-full bg-emerald-400"></span>
-          <span>Офіційні джерела ХАІ</span>
+          {modelStatus === 'model_loaded' ? (
+            <>
+              <span className="w-2 h-2 rounded-full bg-emerald-400"></span>
+              <span>Семантичний пошук готовий</span>
+            </>
+          ) : modelStatus === 'loading_model' ? (
+            <>
+              <Loader2 className="animate-spin" size={12} />
+              <span>Завантаження моделі...</span>
+            </>
+          ) : (
+            <>
+              <span className="w-2 h-2 rounded-full bg-blue-300"></span>
+              <span>Офіційні джерела ХАІ</span>
+            </>
+          )}
         </div>
       </div>
 
