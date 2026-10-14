@@ -1,3 +1,4 @@
+// src/ai/llm-groq.ts
 import { CONFIG } from '../config';
 import { KnowledgeChunk } from './retrieval';
 
@@ -94,7 +95,7 @@ export async function queryGroqLLM(
 
   try {
     const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 15000); // Увеличили таймаут
+    const timeoutId = setTimeout(() => controller.abort(), 15000);
 
     const response = await fetch(proxyUrl, {
       method: 'POST',
@@ -152,16 +153,16 @@ export interface LLMClassificationResult {
 }
 
 const CLASSIFICATION_PROMPT = `You are an intent classifier for KhAI university assistant.
+
+CRITICAL: If the query contains pronouns like "у них", "для них", "а что у них", "там", it means the user is referring to a PREVIOUS context. Use the conversation history to resolve it.
+
 Given a user query in Ukrainian, classify it into ONE of these intents:
 schedule_group, schedule_teacher, schedule_room, admission_rules, admission_specialties, admission_score, documents, dormitory, conferences, publications, contacts, platforms, payment, scholarship, unknown.
 
-Extract these entities if present:
-- group: group number (e.g., "545б", "525ст")
-- teacher: teacher name (e.g., "Землянко")
-- room: room number (e.g., "227с")
-- day: day of week (e.g., "понеділок", "вівторок")
-- specialty: specialty code (e.g., "134", "121")
-- date: any date mentioned
+EXAMPLES:
+- "а що у них завтра?" → intent: schedule_group, entities: {} (but context from history should be used)
+- "розклад 545б" → intent: schedule_group, entities: {group: "545б"}
+- "коли пари у Землянка?" → intent: schedule_teacher, entities: {teacher: "Землянко"}
 
 Return ONLY valid JSON in this exact format:
 {"intent": "...", "entities": {...}, "confidence": 0.0-1.0}
