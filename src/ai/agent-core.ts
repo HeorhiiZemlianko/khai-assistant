@@ -93,7 +93,19 @@ export class AgentCore {
     }
 
     // ── Шаг 3: Классификация намерения ─────────────────────────
-    const classification = await classifyIntentHybrid(resolvedQuery, role, 0.5);
+    // Передаём историю, чтобы LLM-классификатор мог разрешить
+    // займенники ("у них", "для них", "там") из предыдущих сообщений.
+    const historyForClassification = this.memory
+      .getHistory()
+      .slice(-4)
+      .map(m => ({ sender: m.sender, text: m.text }));
+    
+    const classification = await classifyIntentHybrid(
+      resolvedQuery,
+      role,
+      0.5,
+      historyForClassification
+    );
     resolvedEntities = {
       ...resolvedEntities,
       ...classification.entities,
