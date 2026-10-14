@@ -158,6 +158,7 @@ export default function App() {
       sender: 'user',
       text: query,
       timestamp: Date.now(),
+      entities: {}
     });
 
     setIsProcessing(true);
