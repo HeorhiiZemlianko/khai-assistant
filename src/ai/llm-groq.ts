@@ -1,4 +1,3 @@
-// src/ai/llm-groq.ts
 import { CONFIG } from '../config';
 import { KnowledgeChunk } from './retrieval';
 
@@ -170,7 +169,8 @@ Do not add any other text.`;
 
 export async function classifyWithLLM(
   query: string,
-  role: string
+  role: string,
+  history?: Array<{ sender: string; text: string }>
 ): Promise<LLMClassificationResult | null> {
   const proxyUrl = CONFIG.GROQ_PROXY_URL;
 
@@ -185,6 +185,14 @@ export async function classifyWithLLM(
     const controller = new AbortController();
     const timeoutId = setTimeout(() => controller.abort(), 5000);
 
+    const historyStr =
+      history && history.length > 0
+        ? history
+            .slice(-4)
+            .map(m => `${m.sender === 'user' ? 'Користувач' : 'Асистент'}: ${m.text}`)
+            .join('\n')
+        : 'Немає попередніх повідомлень';
+
     const response = await fetch(proxyUrl, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -194,7 +202,7 @@ export async function classifyWithLLM(
         context: [],
         role,
         system_prompt: CLASSIFICATION_PROMPT,
-        user_prompt: `User role: ${role}. Query: "${query}"`,
+        user_prompt: `User role: ${role}. Query: "${query}"\n\nІсторія діалогу:\n${historyStr}`,
       }),
     });
 
