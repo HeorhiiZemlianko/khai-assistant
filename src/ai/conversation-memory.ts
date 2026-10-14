@@ -42,13 +42,21 @@ export class ConversationMemory {
    * то при запросе "а что у них завтра?" — group=545б.
    */
   getLastKnownEntities(): Record<string, any> {
+    // Ищем в истории ВСЕ сообщения пользователя, пока не найдем сущности
     for (let i = this.messages.length - 1; i >= 0; i--) {
       const msg = this.messages[i];
       if (msg.sender === 'user' && msg.entities) {
         const meaningful = Object.entries(msg.entities).filter(
-          ([_, v]) => v !== undefined && v !== null && v !== ''
+          ([key, v]) => 
+            v !== undefined && 
+            v !== null && 
+            v !== '' && 
+            // Исключаем даты из сущностей, чтобы не подставлять "завтра" в новый запрос
+            key !== 'date' && 
+            key !== 'day'
         );
         if (meaningful.length > 0) {
+          console.log(`[Memory] Found entities in message #${i}:`, Object.fromEntries(meaningful));
           return Object.fromEntries(meaningful);
         }
       }
