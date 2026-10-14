@@ -1,3 +1,4 @@
+// src/ai/llm-groq.ts
 import { CONFIG } from '../config';
 import { KnowledgeChunk } from './retrieval';
 
@@ -12,56 +13,107 @@ RULES:
 5. Never repeat phrases. Never output random characters.
 6. End with the most relevant source URL.`;
 
-function buildUserPrompt(query: string, chunks: KnowledgeChunk[], role: string): string {
+function buildUserPrompt(
+  query: string,
+  chunks: KnowledgeChunk[],
+  role: string,
+  parsedDate?: { isoDate: string; humanReadable: string } | null,
+  history?: Array<{ sender: string; text: string }>,
+  resolvedEntities?: Record<string, any>
+): string {
+  const today = new Date();
+  const todayStr = today.toLocaleDateString('uk-UA', {
+    weekday: 'long',
+    year: 'numeric',
+    month: 'long',
+    day: 'numeric',
+  });
+  const todayIso = today.toISOString().split('T')[0];
+
   const contextStr = chunks
     .slice(0, 5)
-    .map((c, i) => {
-      return `[Джерело ${i + 1} (${c.source_url})]:\n${c.text}`;
-    })
+    .map((c, i) => `[Джерело ${i + 1} (${c.source_url})]:\n${c.text}`)
     .join('\n\n');
 
-  return `Офіційний контекст ХАІ:
+  const historyStr =
+    history && history.length > 0
+      ? history
+          .slice(-6)
+          .map(m => `${m.sender === 'user' ? 'Користувач' : 'Асистент'}: ${m.text}`)
+          .join('\n')
+      : 'Немає попередніх повідомлень';
+
+  const entitiesStr = resolvedEntities
+    ? Object.entries(resolvedEntities)
+        .filter(([, v]) => v)
+        .map(([k, v]) => `${k} = ${v}`)
+        .join(', ')
+    : 'не визначено';
+
+  const dateStr = parsedDate
+    ? `Користувач запитав про дату: "${parsedDate.humanReadable}" (ISO: ${parsedDate.isoDate}).`
+    : 'Конкретна дата у запиті не вказана.';
+
+  return `СЬОГОДНІШНЯ ДАТА: ${todayStr} (${todayIso}).
+ЦЕ ВАЖЛИВО: Ти маєш використовувати саме цю дату як "сьогодні". Не вигадуй інші дати!
+
+${dateStr}
+
+РОЗПІЗНАНІ СУТНОСТІ З ЗАПИТУ: ${entitiesStr}
+
+ІСТОРІЯ ДІАЛОГУ (останні повідомлення):
+${historyStr}
+
+ОФІЦІЙНИЙ КОНТЕКСТ ХАІ:
 ${contextStr}
 
+ПОТОЧНИЙ ЗАПИТ КОРИСТУВАЧА: ${query}
 Роль користувача: ${role}
-Запитання користувача: ${query}
 
 ІНСТРУКЦІЇ:
 1. Дай розгорнуту, структуровану відповідь українською мовою.
-2. Використовуй списки, виділення жирним, емодзі для структури.
-3. Якщо в контексті є конкретні дати, номери, назви — обов'язково наведи їх.
-4. Якщо контекст неповний, чесно скажи, чого не вистачає, і запропонуй, куди звернутися.
-5. В кінці додай 1-3 найрелевантніші посилання з контексту.
-6. Не вигадуй факти, яких немає в контексті.`;
+2. Якщо запит стосується "завтра", "сьогодні", "в понеділок" — використовуй дату, розраховану вище.
+3. Якщо в історії діалогу згадувалась група, викладач або аудиторія, і зараз використовується займенник ("у них", "для нього") — обов'язково підстав цю сутність.
+4. Використовуй списки, виділення жирним, емодзі для структури.
+5. Якщо в контексті немає точної інформації (наприклад, розкладу на завтра) — чесно скажи: "На жаль, у наданих джерелах немає розкладу на цю дату. Спробуйте перевірити офіційний сайт."
+6. НЕ ВИГАДУЙ факти, дати та події, яких немає в контексті. Краще визнати нестачу інформації, ніж згенерувати галюцинацію.
+7. В кінці додай 1-3 найрелевантніші посилання з контексту.`;
 }
 
 export async function queryGroqLLM(
   query: string,
   chunks: KnowledgeChunk[],
-  role: string
+  role: string,
+  parsedDate?: any,
+  history?: any[],
+  resolvedEntities?: Record<string, any>
 ): Promise<string | null> {
   const proxyUrl = CONFIG.GROQ_PROXY_URL;
   if (!proxyUrl || proxyUrl.trim() === '') {
-    // Groq proxy not configured; silently skip to template generator
     return null;
   }
 
   try {
     const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 6000); // 6s timeout
+    const timeoutId = setTimeout(() => controller.abort(), 15000); // Увеличили таймаут
 
     const response = await fetch(proxyUrl, {
       method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-      },
+      headers: { 'Content-Type': 'application/json' },
       signal: controller.signal,
       body: JSON.stringify({
         query,
-        context: chunks.slice(0, 3),
+        context: chunks.map(c => c.text),
         role,
         system_prompt: SYSTEM_PROMPT_UK(role),
-        user_prompt: buildUserPrompt(query, chunks, role),
+        user_prompt: buildUserPrompt(
+          query,
+          chunks,
+          role,
+          parsedDate,
+          history,
+          resolvedEntities
+        ),
       }),
     });
 
@@ -73,8 +125,9 @@ export async function queryGroqLLM(
     }
 
     const data = await response.json();
-    const content = data?.choices?.[0]?.message?.content || data?.response || data?.text;
-    
+    const content =
+      data?.choices?.[0]?.message?.content || data?.response || data?.text;
+
     if (content && typeof content === 'string') {
       return content.trim();
     }
@@ -121,8 +174,8 @@ export async function classifyWithLLM(
 ): Promise<LLMClassificationResult | null> {
   const proxyUrl = CONFIG.GROQ_PROXY_URL;
 
-  console.log('[LLM] Proxy URL:', proxyUrl); 
-  
+  console.log('[LLM] Proxy URL:', proxyUrl);
+
   if (!proxyUrl || proxyUrl.trim() === '') {
     console.warn('[LLM] Proxy URL is empty, skipping LLM');
     return null;
@@ -153,7 +206,6 @@ export async function classifyWithLLM(
     const raw = data?.choices?.[0]?.message?.content || data?.response || data?.text;
     if (!raw || typeof raw !== 'string') return null;
 
-    // Extract JSON from possible markdown code fences
     const jsonMatch = raw.match(/\{[\s\S]*\}/);
     if (!jsonMatch) return null;
 
