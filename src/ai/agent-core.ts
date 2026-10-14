@@ -1,8 +1,11 @@
+// src/ai/agent-core.ts
 import { parseRelativeDate, ParsedDate } from '../utils/date-parser';
 import { ConversationMemory } from './conversation-memory';
 import { classifyIntentHybrid, HybridClassificationResult, ExtractedEntities } from './intent-classifier';
 import { BM25Retriever, SearchResult } from './retrieval';
 import { CONFIG } from '../config';
+import { ToolExecutor } from './tool-executor';
+import { TOOLS } from './tools';
 
 export interface AgentStep {
   step: string;
@@ -103,7 +106,7 @@ export class AgentCore {
       data: classification,
     });
 
-    // ── Шаг 4: Multi-Query rewriting (Шаг 4.8) ──────────────────
+    // ── Шаг 4: Multi-Query rewriting ──────────────────
     const queries = await this.rewriteQuery(resolvedQuery);
     steps.push({
       step: 'query-rewriting',
@@ -162,7 +165,7 @@ export class AgentCore {
       data: searchResults.slice(0, 3),
     });
 
-    // ── Шаг 6: Реранкинг через LLM (Шаг 4.7) ────────────────────
+    // ── Шаг 6: Реранкинг через LLM ────────────────────
     const reranked = await this.rerankChunks(resolvedQuery, searchResults, 3);
     steps.push({
       step: 'rerank',
@@ -182,6 +185,83 @@ export class AgentCore {
   }
 
   /**
+   * Альтернативный режим: LLM сам решает, какие инструменты вызывать.
+   * Итеративно выполняет tool-calls до получения финального ответа
+   * или до исчерпания MAX_ITERATIONS.
+   */
+  async processWithTools(query: string, role: string): Promise<AgentResult> {
+    const steps: AgentStep[] = [];
+    const executor = new ToolExecutor(this.retriever);
+
+    // Формируем системный промпт с описанием инструментов
+    const toolsDescription = TOOLS.map(t =>
+      `- ${t.name}: ${t.description}\n  Параметры: ${JSON.stringify(t.parameters)}`
+    ).join('\n');
+
+    const systemPrompt = `Ти — AI-агент ХАІ. У тебе є інструменти:
+${toolsDescription}
+
+Поверни JSON: {"tool": "назва", "args": {...}} або {"tool": "final", "answer": "текст відповіді"}.
+Використовуй інструменти, якщо потрібна додаткова інформація.`;
+
+    let iteration = 0;
+    const MAX_ITERATIONS = 3;
+    let finalAnswer = '';
+    let allSearchResults: SearchResult[] = [];
+    let workingQuery = query;
+
+    while (iteration < MAX_ITERATIONS) {
+      iteration++;
+      const llmResponse = await this.callLLMForTools(systemPrompt, workingQuery, steps);
+
+      if (!llmResponse || llmResponse.tool === 'final') {
+        finalAnswer = llmResponse?.answer || '';
+        break;
+      }
+
+      // Выполняем инструмент
+      const result = await executor.execute(llmResponse.tool, llmResponse.args || {});
+      steps.push({
+        step: `tool:${llmResponse.tool}`,
+        status: 'success',
+        detail: `Виклик ${llmResponse.tool} з ${JSON.stringify(llmResponse.args)}`,
+        data: result,
+      });
+
+      if (llmResponse.tool === 'search_knowledge_base' && Array.isArray(result)) {
+        allSearchResults = result.map((r: any) => ({
+          score: r.score,
+          chunk: {
+            id: r.url,
+            source_url: r.url,
+            text: r.text,
+            title: r.title,
+            category: '',
+            roles: [],
+          },
+        }));
+      }
+
+      // Добавляем результат в контекст для следующей итерации
+      workingQuery += `\n\nРезультат ${llmResponse.tool}: ${JSON.stringify(result).slice(0, 2000)}`;
+    }
+
+    return {
+      classification: {
+        intent: 'tool_based',
+        entities: {},
+        confidence: 0.9,
+        method: 'llm',
+      },
+      resolvedEntities: {},
+      parsedDate: null,
+      searchResults: allSearchResults,
+      steps,
+      finalQuery: finalAnswer || workingQuery,
+    };
+  }
+
+  /**
    * Расширяет запрос синонимами в зависимости от намерения.
    */
   private expandQuery(query: string, intent: string): string {
@@ -197,7 +277,7 @@ export class AgentCore {
   }
 
   /**
-   * Query Rewriting (Шаг 4.8).
+   * Query Rewriting.
    * Генерирует 2-3 альтернативных формулировки запроса через LLM
    * для повышения полноты поиска. При недоступности LLM возвращает
    * только оригинальный запрос.
@@ -223,7 +303,6 @@ export class AgentCore {
       const match = typeof raw === 'string' ? raw.match(/\[[\s\S]*\]/) : null;
       const parsed = match ? JSON.parse(match[0]) : [];
 
-      // Оставляем только непустые строки, отличные от оригинала
       const queries: string[] = Array.isArray(parsed)
         ? parsed
             .filter((q: unknown): q is string => typeof q === 'string' && q.trim().length > 0)
@@ -238,7 +317,7 @@ export class AgentCore {
   }
 
   /**
-   * Переранжирование результатов через LLM (Шаг 4.7).
+   * Переранжирование результатов через LLM.
    * LLM оценивает релевантность каждого чанка запросу (0..10),
    * затем исходный score комбинируется с LLM-оценкой.
    */
@@ -290,5 +369,43 @@ ${chunks.map((c, i) => `[${i}] ${c.chunk.text.slice(0, 300)}`).join('\n\n')}
     }
 
     return chunks.slice(0, topK);
+  }
+
+  /**
+   * Вызов LLM для режима tool-calling.
+   * Отправляет system prompt с описанием инструментов и историю шагов,
+   * ожидает JSON-объект с решением о следующем действии.
+   */
+  private async callLLMForTools(
+    systemPrompt: string,
+    query: string,
+    steps: AgentStep[]
+  ): Promise<any> {
+    if (!CONFIG.GROQ_PROXY_URL) {
+      return { tool: 'final', answer: '' };
+    }
+
+    const history = steps.map(s => `[${s.step}] ${s.detail}`).join('\n');
+
+    try {
+      const response = await fetch(CONFIG.GROQ_PROXY_URL, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          system_prompt: systemPrompt,
+          user_prompt: `Запит: "${query}"\n\nІсторія дій:\n${history}\n\nЩо робити далі?`,
+        }),
+      });
+      const data = await response.json();
+      const raw = data?.choices?.[0]?.message?.content || data?.response || '';
+      if (typeof raw !== 'string') {
+        return { tool: 'final', answer: '' };
+      }
+      const match = raw.match(/\{[\s\S]*\}/);
+      return JSON.parse(match?.[0] || '{}');
+    } catch (e) {
+      console.warn('[Tool LLM] Failed:', e);
+      return { tool: 'final', answer: '' };
+    }
   }
 }
