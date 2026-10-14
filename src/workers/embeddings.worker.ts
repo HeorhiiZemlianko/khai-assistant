@@ -2,6 +2,8 @@ import { pipeline, env } from '@xenova/transformers';
 
 env.allowRemoteModels = true;
 env.allowLocalModels = false;
+env.useBrowserCache = true;
+env.cacheDir = 'khai-embeddings-cache';
 
 let embedderPipeline: any = null;
 let isInitializing = false;
