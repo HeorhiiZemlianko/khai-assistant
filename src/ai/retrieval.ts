@@ -28,10 +28,68 @@ function tokenize(text: string): string[] {
     .filter(w => w.length > 2);
 }
 
+/**
+ * Рекурсивное разбиение длинного текста на чанки с перекрытием.
+ * Сначала пробуем делить по крупным разделителям (\n\n, \n),
+ * затем по предложениям, затем по словам. Перекрытие помогает
+ * сохранять контекст на границах чанков.
+ *
+ * @param text      исходный текст
+ * @param maxSize   максимальный размер одного чанка (в символах)
+ * @param overlap   размер перекрытия между соседними чанками
+ * @returns         массив чанков
+ */
+export function recursiveChunk(
+  text: string,
+  maxSize: number = 500,
+  overlap: number = 50
+): string[] {
+  if (!text) return [];
+
+  const separators = ['\n\n', '\n', '. ', '! ', '? ', '; ', ', ', ' '];
+  let chunks: string[] = [text];
+
+  for (const sep of separators) {
+    const newChunks: string[] = [];
+    for (const chunk of chunks) {
+      if (chunk.length <= maxSize) {
+        newChunks.push(chunk);
+        continue;
+      }
+      const parts = chunk.split(sep);
+      let current = '';
+      for (const part of parts) {
+        if ((current + sep + part).length > maxSize && current.length > 0) {
+          newChunks.push(current.trim());
+          current = part;
+        } else {
+          current = current ? current + sep + part : part;
+        }
+      }
+      if (current.trim()) newChunks.push(current.trim());
+    }
+    chunks = newChunks;
+    if (chunks.every(c => c.length <= maxSize)) break;
+  }
+
+  // Добавляем перекрытие: к каждому чанку (кроме первого)
+  // приклеиваем «хвост» предыдущего.
+  const overlapped: string[] = [];
+  for (let i = 0; i < chunks.length; i++) {
+    let chunk = chunks[i];
+    if (i > 0) {
+      const prevTail = chunks[i - 1].slice(-overlap);
+      chunk = prevTail + ' ' + chunk;
+    }
+    overlapped.push(chunk);
+  }
+  return overlapped;
+}
+
 export class BM25Retriever {
   private documents: KnowledgeChunk[] = [];
   private docTokens: string[][] = [];
-  private titleTokens: string[][] = [];
+  private titleTokens: string[][] = {};
   private df: Record<string, number> = {};
   private docLengths: number[] = [];
   private avgdl: number = 0;
@@ -50,7 +108,6 @@ export class BM25Retriever {
     this.df = {};
     this.docLengths = [];
 
-    // при переиндексации сбрасываем эмбеддинги
     this.embeddings = [];
     this.embeddingsIndexed = false;
 
@@ -94,17 +151,14 @@ export class BM25Retriever {
       const docFreq = this.df[token];
       if (!docFreq) return;
 
-      // IDF
       const idf = Math.log((this.n - docFreq + 0.5) / (docFreq + 0.5) + 1);
 
       for (let i = 0; i < this.n; i++) {
         const doc = this.documents[i];
 
-        // Term frequency in all tokens
         const tf = this.docTokens[i].filter(t => t === token).length;
         if (tf === 0) continue;
 
-        // Extra boost if term appears in title
         const inTitleCount = this.titleTokens[i].filter(t => t === token).length;
         const titleWeightBoost = inTitleCount > 0 ? 2.5 : 1.0;
 
@@ -113,7 +167,6 @@ export class BM25Retriever {
 
         let termScore = idf * (numerator / denominator) * titleWeightBoost;
 
-        // Role adjustment
         if (doc.roles && doc.roles.length > 0) {
           if (doc.roles.includes(role) || doc.roles.includes('Всі')) {
             termScore *= 1.3;
@@ -138,10 +191,6 @@ export class BM25Retriever {
     return results;
   }
 
-  /**
-   * Асинхронная индексация эмбеддингов для всех чанков (батчами).
-   * Вызывать после index(documents).
-   */
   async buildEmbeddingIndex(): Promise<void> {
     if (this.embeddingsIndexed) return;
     console.log('[Retrieval] Building embedding index...');
@@ -164,35 +213,25 @@ export class BM25Retriever {
     console.log(`[Retrieval] Embedding index built in ${Date.now() - start}ms`);
   }
 
-  /**
-   * Гибридный поиск: BM25 + семантическое сходство.
-   * @param alpha Вес BM25 (0..1). 1 = только BM25, 0 = только семантика.
-   */
   async searchHybrid(
     query: string,
     topK: number = 5,
     role: string = 'Студент',
     alpha: number = 0.6
   ): Promise<SearchResult[]> {
-    // 1. BM25-результаты (берём с запасом)
     const bm25Results = this.search(query, topK * 2, role);
 
-    // 2. Если эмбеддинги не построены — вернуть только BM25
     if (!this.embeddingsIndexed || this.embeddings.length === 0) {
       console.log('[Retrieval] Embeddings not ready, using BM25 only');
       return bm25Results.slice(0, topK);
     }
 
-    // 3. Эмбеддинг запроса (одиночный — через embedBatch удобнее не гонять,
-    //    но т.к. embedText убран из импорта, используем embedBatch([query]))
     const [queryVec] = await embedBatch([query]);
 
-    // 4. Семантические оценки для всех чанков
     const semanticScores: number[] = this.embeddings.map((emb) =>
       cosineSimilarity(queryVec, emb)
     );
 
-    // 5. Нормализация BM25-оценок в [0, 1]
     const maxBm25 = Math.max(...bm25Results.map((r) => r.score), 1e-6);
     const bm25Map = new Map<number, number>();
 
@@ -206,12 +245,10 @@ export class BM25Retriever {
       }
     });
 
-    // 6. Нормализация семантических оценок в [0, 1]
     const minSem = Math.min(...semanticScores);
     const maxSem = Math.max(...semanticScores, 1e-6);
     const semRange = maxSem - minSem || 1;
 
-    // 7. Объединённая оценка
     const combined: SearchResult[] = [];
 
     for (let i = 0; i < this.documents.length; i++) {
@@ -227,7 +264,6 @@ export class BM25Retriever {
       }
     }
 
-    // 8. Сортировка и топ-K
     combined.sort((a, b) => b.score - a.score);
     return combined.slice(0, topK);
   }
