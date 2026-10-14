@@ -7,6 +7,8 @@ import { validateResponse } from './ai/quality-gate';
 import { queryGroqLLM } from './ai/llm-groq';
 import { CONFIG } from './config';
 import seedData from './data/seed-knowledge.json';
+import { AgentCore } from './ai/agent-core';
+import { ConversationMemory } from './ai/conversation-memory';
 
 const ROLES = {
   STUDENT: 'Студент',
@@ -38,6 +40,8 @@ export default function App() {
   const [suggestions, setSuggestions] = useState([]);
 
   const retrieverRef = useRef(new BM25Retriever());
+  const memoryRef = useRef(new ConversationMemory(10)); // храним последние 10 сообщений
+  const agentRef = useRef(null);
   const messagesEndRef = useRef(null);
 
   useEffect(() => {
@@ -79,6 +83,14 @@ export default function App() {
     loadKnowledge();
   }, []);
 
+  // После инициализации ретривера создаём агент
+  useEffect(() => {
+    if (!loadingKB && retrieverRef.current) {
+      agentRef.current = new AgentCore(retrieverRef.current, memoryRef.current);
+      console.log('[App] AgentCore initialized');
+    }
+  }, [loadingKB]);
+
   const scrollToBottom = () => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   };
@@ -89,6 +101,8 @@ export default function App() {
 
   const handleRoleSelect = (selectedRole) => {
     setRole(selectedRole);
+    // Очищаем память при смене роли, чтобы не тащить контекст прошлой сессии
+    memoryRef.current.clear?.();
     setMessages([{
       sender: 'bot',
       text: `Вітаю! Я інтелектуальний помічник Національного аерокосмічного університету «ХАІ» ✈️\n\nЧим можу допомогти вам як **${selectedRole.toLowerCase()}у**? Виберіть дію зі списку або задайте будь-яке питання про розклад, вступ, навчання, гуртожиток чи наукову діяльність.`
@@ -124,34 +138,30 @@ export default function App() {
     setInput('');
     setSuggestions([]);
     setMessages(prev => [...prev, { sender: 'user', text: query }]);
+
+    // Сохраняем сообщение пользователя в память
+    memoryRef.current.add({
+      sender: 'user',
+      text: query,
+      timestamp: Date.now(),
+    });
+
     setIsProcessing(true);
 
     try {
-      // 1. Layer 1: Hybrid Intent Classification (rules → LLM fallback)
-      const classification = await classifyIntentHybrid(query, role || 'Студент', 0.5);
-      console.log('[AI Core] Classification:', {
-        intent: classification.intent,
-        confidence: classification.confidence.toFixed(2),
-        entities: classification.entities,
-        method: classification.method
-      });
+      // ── Запуск агента ──────────────────────────────────────────
+      const agentResult = await agentRef.current.process(query, role || 'Студент');
 
-      // 2. Layer 2: Hybrid Retrieval (BM25 + semantic)
-      const searchResults = await retrieverRef.current.searchHybrid(
-        query,
-        5,
-        role || 'Студент',
-        0.6 // вес BM25; 1 - 0.6 = 0.4 — вес семантики
-      );
+      // Логируем шаги агента
+      console.log('[Agent] Steps:', agentResult.steps);
+      console.log('[Agent] Resolved entities:', agentResult.resolvedEntities);
+      console.log('[Agent] Parsed date:', agentResult.parsedDate);
+
+      const { classification, resolvedEntities, searchResults, finalQuery } = agentResult;
       const topChunks = searchResults.map(r => r.chunk);
       const bestScore = searchResults.length > 0 ? searchResults[0].score : 0;
 
-      console.log(`[AI Core] Retrieved ${searchResults.length} chunks. Best score: ${bestScore.toFixed(3)}`);
-      if (searchResults.length > 0) {
-        console.log('[AI Core] Top chunks:', searchResults.slice(0, 3));
-      }
-
-      // 3. Layer 3 & 4: Response Generation (Groq LLM optional -> Fallback to robust templates)
+      // ── Генерация ответа (LLM или шаблон) ──────────────────────
       let candidateResponse = '';
       let usedGroq = false;
 
@@ -159,53 +169,54 @@ export default function App() {
         CONFIG.GROQ_PROXY_URL &&
         topChunks.length > 0 &&
         (classification.confidence < CONFIG.LOW_CONFIDENCE_THRESHOLD ||
-         classification.intent === 'unknown' ||
-         (bestScore >= 0.5 && bestScore >= CONFIG.MIN_RELEVANCE_SCORE))
+          classification.intent === 'unknown' ||
+          bestScore >= CONFIG.MIN_RELEVANCE_SCORE)
       ) {
-        console.log('[AI Core] Attempting Groq LLM proxy...');
-        const groqResult = await queryGroqLLM(query, topChunks, role || 'Студент');
+        const groqResult = await queryGroqLLM(finalQuery, topChunks, role || 'Студент');
         if (groqResult) {
           candidateResponse = groqResult;
           usedGroq = true;
-          console.log('[AI Core] Groq response received');
         }
       }
 
-      // If Groq wasn't used or failed, use human-crafted response templates
       if (!candidateResponse) {
         const finalIntent = (bestScore < CONFIG.MIN_RELEVANCE_SCORE && classification.intent === 'unknown')
           ? 'unknown'
           : classification.intent;
-
         candidateResponse = generateTemplateResponse(
           finalIntent,
-          classification.entities,
+          resolvedEntities,
           topChunks,
           role || 'Студент',
-          query
+          finalQuery
         );
       }
 
-      // 4. Layer 5: Quality Gate validation
+      // ── Quality Gate ───────────────────────────────────────────
       const validation = validateResponse(candidateResponse);
-      console.log('[AI Core] Quality Gate validation:', validation);
-
       let finalResponse = candidateResponse;
       if (!validation.isValid) {
-        console.warn(`[AI Core] Response rejected by Quality Gate: ${validation.reason}. Falling back to default template.`);
         finalResponse = generateTemplateResponse(
           classification.intent,
-          classification.entities,
+          resolvedEntities,
           topChunks,
           role || 'Студент',
-          query
+          finalQuery
         );
       }
 
-      // Collect unique relevant source URLs
       const sources = Array.from(
         new Set(topChunks.map(c => c.source_url).filter(Boolean))
       ).slice(0, 3);
+
+      // Сохраняем ответ бота в память
+      memoryRef.current.add({
+        sender: 'bot',
+        text: finalResponse,
+        intent: classification.intent,
+        entities: resolvedEntities,
+        timestamp: Date.now(),
+      });
 
       setMessages(prev => [
         ...prev,
@@ -214,17 +225,17 @@ export default function App() {
           text: finalResponse,
           sources: sources.length > 0 ? sources : undefined,
           intent: classification.intent,
-          usedGroq
-        }
+          usedGroq,
+        },
       ]);
     } catch (err) {
-      console.error('[AI Core] Error generating response:', err);
+      console.error('[Agent] Error:', err);
       setMessages(prev => [
         ...prev,
         {
           sender: 'bot',
-          text: `На жаль, під час обробки запиту виникла помилка. Спробуйте ще раз або зверніться до офіційного порталу ХАІ: https://khai.edu`
-        }
+          text: `На жаль, під час обробки запиту виникла помилка. Спробуйте ще раз або зверніться до офіційного порталу ХАІ: https://khai.edu`,
+        },
       ]);
     } finally {
       setIsProcessing(false);
