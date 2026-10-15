@@ -2,7 +2,7 @@
 
 # 🚀 Інтелектуальний помічник ХАІ
 
-### Гібридний AI-асистент для Національного аерокосмічного університету ім. М. Є. Жуковського
+### Гібридний AI-асистент для Національного аерокосмічного університету
 
 [![Deploy](https://img.shields.io/badge/deploy-GitHub%20Pages-blue?logo=github)](https://heorhiizemlianko.github.io/khai-assistant/)
 [![React](https://img.shields.io/badge/React-18-61DAFB?logo=react&logoColor=white)](https://react.dev/)
